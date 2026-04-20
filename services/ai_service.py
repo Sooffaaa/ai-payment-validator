@@ -3,57 +3,59 @@ from core.config import Config
 import json
 import re
 
+
 class AIService:
     def __init__(self):
+        Config.validate()
+
         self.client = OpenAI(
             base_url=Config.BASE_URL,
-            api_key=Config.OPENROUTER_API_KEY
+            api_key=Config.OPENROUTER_API_KEY,
+            default_headers={
+                "HTTP-Referer": Config.SITE_URL,
+                "X-Title": Config.SITE_NAME,
+            }
         )
 
-    def extract_payment_data(self, text: str):
-        try:
-            response = self.client.chat.completions.create(
-                model=Config.DEFAULT_MODEL,
-                messages=[
-                    {
-                        "role": "system", 
-                        "content": (
-                            "You are a professional financial data extractor. "
-                            "Extract details into a valid JSON object. "
-                            "Format: {\"amount\": float, \"currency\": \"string\", \"address\": \"string\"}. "
-                            "Rules: "
-                            "1. Output ONLY JSON. "
-                            "2. No markdown blocks (no ```json). "
-                            "3. Use double quotes for keys and values. "
-                            "4. If data is missing, use null."
-                        )
-                    },
-                    {
-                        "role": "user", 
-                        "content": f"Example: 'Send 100 USD to 0x123' -> {{\"amount\": 100.0, \"currency\": \"USD\", \"address\": \"0x123\"}}. "
-                                   f"Now parse this text: {text}"
-                    }
-                ],
-                temperature=0.1,
-            )
+    def extract_payment_data(self, text: str) -> dict:
+        last_error = None
 
-            raw_content = response.choices[0].message.content
+        for model in Config.DEFAULT_MODELS:
+            try:
+                response = self.client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "Ты парсер финансовых данных. "
+                                "Извлеки и верни строго JSON с полями:\n"
+                                "- amount (число)\n"
+                                "- currency (строка)\n"
+                                "- address (строка)\n\n"
+                                "Без объяснений. Только JSON."
+                            )
+                        },
+                        {"role": "user", "content": text}
+                    ],
+                    response_format={"type": "json_object"},
+                )
 
-            match = re.search(r'\{.*\}', raw_content, re.DOTALL)
-            if not match:
-                raise Exception(f"JSON не найден в ответе ИИ. Ответ: {raw_content[:50]}...")
-            
-            clean_json = match.group(0)
+                content = response.choices[0].message.content
 
-            clean_json = clean_json.replace("```json", "").replace("```", "").strip()
+                try:
+                    return json.loads(content)
+                except json.JSONDecodeError:
+                    return self._extract_json_fallback(content)
 
-            clean_json = clean_json.replace("'", '"')
+            except Exception as e:
+                last_error = e
+                continue
 
-            clean_json = re.sub(r',\s*}', '}', clean_json)
+        raise Exception(f"Все модели недоступны. Последняя ошибка: {last_error}")
 
-            return json.loads(clean_json)
-
-        except json.JSONDecodeError as e:
-            raise Exception(f"Ошибка формата JSON: {str(e)}. ИИ прислал: {clean_json[:100]}")
-        except Exception as e:
-            raise Exception(f"Сбой сервиса AI: {str(e)}")
+    def _extract_json_fallback(self, text: str) -> dict:
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if match:
+            return json.loads(match.group())
+        raise ValueError("Не удалось извлечь JSON из ответа модели")
